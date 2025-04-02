@@ -7,6 +7,28 @@ const FormData = require('form-data');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const rateLimit = require('express-rate-limit');
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+
+app.use(limiter);
+
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).send('Something broke!');
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).send('OK - Server is running');
+});
+
+app.get('/', (req, res) => {{
+  res.status(200).send('Welcome to the MultiMovies API! <br />Please use /api/multimovies/info or /api/multimovies/stream endpoints to fetch data.<br />More detail visit Github:-https://github.com/mrdeepak125/multimovies-api<br />Check server status:- /health');
+}});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
