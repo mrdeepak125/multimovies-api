@@ -36,7 +36,7 @@ app.get('/health', (req, res) => {
 
 // Home route
 app.get('/', (req, res) => {
-  res.status(200).send('Welcome to the MultiMovies API!');
+  res.status(200).send('Welcome to the MultiMovies API! <br />Please use /api/multimovies/info or /api/multimovies/stream endpoints to fetch data.<br />More detail visit Github:-https://github.com/mrdeepak125/multimovies-api<br />Check server status:- /health');
 });
 
 // Headers configuration
