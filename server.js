@@ -164,116 +164,176 @@ app.get('/api/multimovies/stream', async (req, res) => {
       return res.json(cachedData);
     }
 
-    // Set overall timeout for the operation
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request took too long')), 20000); // 20 seconds
-    });
+    // Step 1: Get initial page
+    const pageResponse = await fetchWithRetry(url);
+    const $ = cheerio.load(pageResponse.data);
 
-    const streamPromise = (async () => {
+    const postId = $('#player-option-1').attr('data-post');
+    const nume = $('#player-option-1').attr('data-nume');
+    const typeValue = $('#player-option-1').attr('data-type');
+
+    if (!postId || !nume || !typeValue) {
+      throw new Error('Player data not found');
+    }
+
+    // Step 2: Make AJAX request
+    const formData = new FormData();
+    formData.append('action', 'doo_player_ajax');
+    formData.append('post', postId);
+    formData.append('nume', nume);
+    formData.append('type', typeValue);
+
+    const ajaxResponse = await axios.post(
+      `${BASE_URL}/wp-admin/admin-ajax.php`,
+      formData,
+      { 
+        headers: { ...headers, ...formData.getHeaders() },
+        timeout: 10000
+      }
+    );
+
+    const playerData = ajaxResponse.data;
+    let iframeUrl = playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i)?.[1] || playerData?.embed_url;
+
+    if (!iframeUrl) {
+      throw new Error('No iframe URL found');
+    }
+
+    // Handle external iframe URLs
+    if (!iframeUrl.includes('multimovies')) {
+      let playerBaseUrl = new URL(iframeUrl).origin;
+      
       try {
-        // Step 1: Get initial page
-        const pageResponse = await fetchWithRetry(url);
-        const $ = cheerio.load(pageResponse.data);
-
-        const postId = $('#player-option-1').attr('data-post');
-        const nume = $('#player-option-1').attr('data-nume');
-        const typeValue = $('#player-option-1').attr('data-type');
-
-        if (!postId || !nume || !typeValue) {
-          throw new Error('Player data not found');
+        // Check for redirects
+        const headResponse = await axios.head(playerBaseUrl, { headers });
+        if (headResponse.request?.res?.responseUrl) {
+          playerBaseUrl = new URL(headResponse.request.res.responseUrl).origin;
         }
+      } catch (e) {
+        console.log('Could not check for redirects:', e.message);
+      }
 
-        // Step 2: Make AJAX request
-        const formData = new FormData();
-        formData.append('action', 'doo_player_ajax');
-        formData.append('post', postId);
-        formData.append('nume', nume);
-        formData.append('type', typeValue);
+      const playerId = iframeUrl.split('/').pop();
+      const embedFormData = new FormData();
+      embedFormData.append('sid', playerId);
 
-        const ajaxResponse = await axios.post(
-          `${BASE_URL}/wp-admin/admin-ajax.php`,
-          formData,
-          { 
-            headers: { ...headers, ...formData.getHeaders() },
-            timeout: 10000 // 10 seconds
-          }
-        );
+      const embedHelperUrl = `${playerBaseUrl}/embedhelper.php`;
 
-        const playerData = ajaxResponse.data;
-        let iframeUrl = playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i)?.[1] || playerData?.embed_url;
-
-        if (!iframeUrl) {
-          throw new Error('No iframe URL found');
-        }
-
-        // Step 3: Get iframe content
-        const iframeResponse = await fetchWithRetry(iframeUrl);
-        const iframeHtml = iframeResponse.data;
-
-        // Step 4: Extract stream URL
-        const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
-        const match = functionRegex.exec(iframeHtml);
-        let decodedScript = '';
-
-        if (match) {
-          const params = match[1].split(',').map(param => param.trim());
-          const encodedString = match[2];
-          let p = encodedString.split("',36,")?.[0].trim();
-          const a = 36;
-          const c = encodedString.split("',36,")[1].slice(2).split('|').length;
-          const k = encodedString.split("',36,")[1].slice(2).split('|');
-
-          for (let i = 0; i < c; i++) {
-            if (k[i]) {
-              const regex = new RegExp('\\b' + i.toString(a) + '\\b', 'g');
-              p = p.replace(regex, k[i]);
-            }
-          }
-
-          decodedScript = p;
-        }
-
-        // Extract stream URL and subtitles
-        const streamUrl = decodedScript?.match(/file:\s*"([^"]+\.m3u8[^"]*)"/)?.[1];
-        const subtitles = [];
-        const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
-
-        subtitleMatches.forEach(sub => {
-          const langMatch = sub.match(/_([a-zA-Z]{3})\.vtt$/);
-          if (langMatch) {
-            subtitles.push({
-              language: langMatch[1],
-              uri: sub,
-              type: 'VTT',
-              title: langMatch[1]
-            });
+      try {
+        const embedResponse = await axios.post(embedHelperUrl, embedFormData, {
+          headers: {
+            ...headers,
+            ...embedFormData.getHeaders()
           }
         });
 
-        if (!streamUrl) {
-          throw new Error('No stream URL found');
+        const embedData = embedResponse.data;
+        const siteUrl = embedData?.siteUrls?.smwh;
+        let siteId;
+        
+        try {
+          siteId = JSON.parse(Buffer.from(embedData?.mresult, 'base64').toString())?.smwh;
+        } catch (e) {
+          siteId = embedData?.mresult?.smwh;
         }
 
-        const cleanStreamUrl = streamUrl.replace(/&i=\d+,'\.4&/, '&i=0.4&');
-
-        return [{
-          server: 'MultiMovies',
-          link: cleanStreamUrl,
-          type: 'm3u8',
-          subtitles,
-          headers: {
-            Referer: iframeUrl,
-            Origin: new URL(iframeUrl).origin,
-            'User-Agent': headers['User-Agent']
-          }
-        }];
-      } catch (error) {
-        console.error('Stream processing error:', error);
-        throw error;
+        if (siteUrl && siteId) {
+          iframeUrl = siteUrl + siteId;
+        }
+      } catch (e) {
+        console.log('Embed helper failed:', e.message);
       }
-    })();
+    }
 
-    const responseData = await Promise.race([streamPromise, timeoutPromise]);
+    // Fetch iframe content
+    const iframeResponse = await fetchWithRetry(iframeUrl);
+    const iframeHtml = iframeResponse.data;
+
+    // Extract stream URL from obfuscated JavaScript
+    const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
+    const match = functionRegex.exec(iframeHtml);
+    let decodedScript = '';
+
+    if (match) {
+      const params = match[1].split(',').map(param => param.trim());
+      const encodedString = match[2];
+      let p = encodedString.split("',36,")?.[0].trim();
+      const a = 36;
+      const c = encodedString.split("',36,")[1].slice(2).split('|').length;
+      const k = encodedString.split("',36,")[1].slice(2).split('|');
+
+      for (let i = 0; i < c; i++) {
+        if (k[i]) {
+          const regex = new RegExp('\\b' + i.toString(a) + '\\b', 'g');
+          p = p.replace(regex, k[i]);
+        }
+      }
+
+      decodedScript = p;
+    }
+
+    // Extract stream URL
+    const streamUrl = decodedScript?.match(/file:\s*"([^"]+\.m3u8[^"]*)"/)?.[1];
+    if (!streamUrl) {
+      throw new Error('No stream URL found');
+    }
+
+    // Clean up stream URL
+    const cleanStreamUrl = streamUrl.replace(/&i=\d+,'\.4&/, '&i=0.4&');
+
+    // Extract subtitles and thumbnail VTT files
+    const subtitles = [];
+    const thumbnailVTTs = [];
+    
+    // Find all VTT URLs in the decoded script
+    const allVTTUrls = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
+
+    allVTTUrls.forEach(vttUrl => {
+      // Check if this is a thumbnail VTT (typically contains "thumb" or "sprite" in the URL)
+      if (vttUrl.match(/(thumb|sprite)/i)) {
+        thumbnailVTTs.push({
+          type: 'THUMBNAILS',
+          uri: vttUrl,
+          name: 'Thumbnails'
+        });
+      } 
+      // Otherwise treat as subtitle
+      else {
+        const langMatch = vttUrl.match(/_([a-zA-Z]{2,3})\.vtt$/i);
+        subtitles.push({
+          language: langMatch ? langMatch[1] : 'en',
+          uri: vttUrl,
+          type: 'SUBTITLES',
+          title: langMatch ? langMatch[1].toUpperCase() : 'English'
+        });
+      }
+    });
+
+    // Also look for image sprites (jpg/png) that might be referenced
+    const imageSpriteMatches = decodedScript?.match(/https:\/\/[^\s"]+\.(jpg|png)/g) || [];
+    imageSpriteMatches.forEach(spriteUrl => {
+      if (spriteUrl.match(/(sprite|thumb)/i)) {
+        thumbnailVTTs.push({
+          type: 'IMAGESPRITE',
+          uri: spriteUrl,
+          name: 'Image Sprite'
+        });
+      }
+    });
+
+    const responseData = [{
+      server: 'MultiMovies',
+      link: cleanStreamUrl,
+      type: 'm3u8',
+      subtitles,
+      thumbnails: thumbnailVTTs.length > 0 ? thumbnailVTTs : undefined,
+      headers: {
+        Referer: iframeUrl,
+        Origin: new URL(iframeUrl).origin,
+        'User-Agent': headers['User-Agent']
+      }
+    }];
+
     cache.set(cacheKey, responseData);
     res.json(responseData);
 
