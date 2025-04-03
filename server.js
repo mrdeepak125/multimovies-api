@@ -153,51 +153,48 @@ app.get('/api/multimovies/info', async (req, res) => {
 // Route to get stream data
 app.get('/api/multimovies/stream', async (req, res) => {
   try {
-    const { url } = req.query;
+    const { url, type } = req.query;
     if (!url) {
       return res.status(400).json({ error: 'Missing url parameter' });
     }
 
-    const cacheKey = `stream:${url}`;
-    const cachedData = cache.get(cacheKey);
-    if (cachedData) {
-      return res.json(cachedData);
-    }
+    console.log('Fetching stream from:', url);
 
-    // Step 1: Get initial page
-    const pageResponse = await fetchWithRetry(url);
-    const $ = cheerio.load(pageResponse.data);
+    const response = await axios.get(url, { headers });
+    const $ = cheerio.load(response.data);
 
     const postId = $('#player-option-1').attr('data-post');
     const nume = $('#player-option-1').attr('data-nume');
     const typeValue = $('#player-option-1').attr('data-type');
 
     if (!postId || !nume || !typeValue) {
-      throw new Error('Player data not found');
+      return res.status(404).json({ error: 'Player data not found' });
     }
 
-    // Step 2: Make AJAX request
     const formData = new FormData();
     formData.append('action', 'doo_player_ajax');
     formData.append('post', postId);
     formData.append('nume', nume);
     formData.append('type', typeValue);
 
-    const ajaxResponse = await axios.post(
-      `${BASE_URL}/wp-admin/admin-ajax.php`,
-      formData,
-      { 
-        headers: { ...headers, ...formData.getHeaders() },
-        timeout: 10000
+    const ajaxUrl = `${BASE_URL}/wp-admin/admin-ajax.php`;
+    console.log('Making AJAX request to:', ajaxUrl);
+
+    const ajaxResponse = await axios.post(ajaxUrl, formData, {
+      headers: {
+        ...headers,
+        ...formData.getHeaders()
       }
-    );
+    });
 
     const playerData = ajaxResponse.data;
     let iframeUrl = playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i)?.[1] || playerData?.embed_url;
 
     if (!iframeUrl) {
-      throw new Error('No iframe URL found');
+      return res.status(404).json({ error: 'No iframe URL found' });
     }
+
+    console.log('Iframe URL:', iframeUrl);
 
     // Handle external iframe URLs
     if (!iframeUrl.includes('multimovies')) {
@@ -218,6 +215,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
       embedFormData.append('sid', playerId);
 
       const embedHelperUrl = `${playerBaseUrl}/embedhelper.php`;
+      console.log('Making embed helper request to:', embedHelperUrl);
 
       try {
         const embedResponse = await axios.post(embedHelperUrl, embedFormData, {
@@ -239,6 +237,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
 
         if (siteUrl && siteId) {
           iframeUrl = siteUrl + siteId;
+          console.log('New iframe URL:', iframeUrl);
         }
       } catch (e) {
         console.log('Embed helper failed:', e.message);
@@ -246,7 +245,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
     }
 
     // Fetch iframe content
-    const iframeResponse = await fetchWithRetry(iframeUrl);
+    const iframeResponse = await axios.get(iframeUrl, { headers });
     const iframeHtml = iframeResponse.data;
 
     // Extract stream URL from obfuscated JavaScript
@@ -272,82 +271,50 @@ app.get('/api/multimovies/stream', async (req, res) => {
       decodedScript = p;
     }
 
-    // Extract stream URL
+    // Extract stream URL and subtitles
     const streamUrl = decodedScript?.match(/file:\s*"([^"]+\.m3u8[^"]*)"/)?.[1];
+    const subtitles = [];
+    const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
+
+    subtitleMatches.forEach(sub => {
+      const langMatch = sub.match(/_([a-zA-Z]{3})\.vtt$/);
+      if (langMatch) {
+        subtitles.push({
+          language: langMatch[1],
+          uri: sub,
+          type: 'VTT',
+          title: langMatch[1]
+        });
+      }
+    });
+
     if (!streamUrl) {
-      throw new Error('No stream URL found');
+      return res.status(404).json({ error: 'No stream URL found' });
     }
 
     // Clean up stream URL
     const cleanStreamUrl = streamUrl.replace(/&i=\d+,'\.4&/, '&i=0.4&');
 
-    // Extract subtitles and thumbnail VTT files
-    const subtitles = [];
-    const thumbnailVTTs = [];
-    
-    // Find all VTT URLs in the decoded script
-    const allVTTUrls = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
-
-    allVTTUrls.forEach(vttUrl => {
-      // Check if this is a thumbnail VTT (typically contains "thumb" or "sprite" in the URL)
-      if (vttUrl.match(/(thumb|sprite)/i)) {
-        thumbnailVTTs.push({
-          type: 'THUMBNAILS',
-          uri: vttUrl,
-          name: 'Thumbnails'
-        });
-      } 
-      // Otherwise treat as subtitle
-      else {
-        const langMatch = vttUrl.match(/_([a-zA-Z]{2,3})\.vtt$/i);
-        subtitles.push({
-          language: langMatch ? langMatch[1] : 'en',
-          uri: vttUrl,
-          type: 'SUBTITLES',
-          title: langMatch ? langMatch[1].toUpperCase() : 'English'
-        });
-      }
-    });
-
-    // Also look for image sprites (jpg/png) that might be referenced
-    const imageSpriteMatches = decodedScript?.match(/https:\/\/[^\s"]+\.(jpg|png)/g) || [];
-    imageSpriteMatches.forEach(spriteUrl => {
-      if (spriteUrl.match(/(sprite|thumb)/i)) {
-        thumbnailVTTs.push({
-          type: 'IMAGESPRITE',
-          uri: spriteUrl,
-          name: 'Image Sprite'
-        });
-      }
-    });
-
-    const responseData = [{
+    res.json([{
       server: 'MultiMovies',
       link: cleanStreamUrl,
       type: 'm3u8',
       subtitles,
-      thumbnails: thumbnailVTTs.length > 0 ? thumbnailVTTs : undefined,
       headers: {
         Referer: iframeUrl,
         Origin: new URL(iframeUrl).origin,
         'User-Agent': headers['User-Agent']
       }
-    }];
-
-    cache.set(cacheKey, responseData);
-    res.json(responseData);
+    }]);
 
   } catch (error) {
-    console.error('Stream endpoint error:', error);
+    console.error('Error:', error);
     res.status(500).json({
-      error: error.message.includes('Request took too long') ? 
-        'The server took too long to respond. Please try again.' : 
-        'Failed to fetch stream data',
+      error: 'Internal server error',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
