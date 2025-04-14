@@ -151,7 +151,6 @@ app.get('/api/multimovies/info', async (req, res) => {
 });
 
 // Route to get stream data
-// Route to get stream data
 app.get('/api/multimovies/stream', async (req, res) => {
   try {
     const { url, type } = req.query;
@@ -161,15 +160,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
 
     console.log('Fetching stream from:', url);
 
-    // Ensure we're using HTTPS for all requests
-    const secureUrl = url.replace(/^http:/, 'https:');
-    const response = await axios.get(secureUrl, { 
-      headers: {
-        ...headers,
-        'Referer': secureUrl,
-        'Origin': new URL(secureUrl).origin
-      }
-    });
+    const response = await axios.get(url, { headers });
     const $ = cheerio.load(response.data);
 
     const postId = $('#player-option-1').attr('data-post');
@@ -186,20 +177,15 @@ app.get('/api/multimovies/stream', async (req, res) => {
     formData.append('nume', nume);
     formData.append('type', typeValue);
 
-    const baseUrl = new URL(secureUrl).origin;
+    const baseUrl = new URL(url).origin;
     const ajaxUrl = `${baseUrl}/wp-admin/admin-ajax.php`;
     console.log('Making AJAX request to:', ajaxUrl);
 
     const playerRes = await axios.post(ajaxUrl, formData, {
       headers: {
         ...headers,
-        'Referer': secureUrl,
-        'Origin': baseUrl,
         ...formData.getHeaders()
-      },
-      // Important for Vercel environment
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 400
+      }
     });
 
     const playerData = playerRes.data;
@@ -209,12 +195,6 @@ app.get('/api/multimovies/stream', async (req, res) => {
       return res.status(404).json({ error: 'No iframe URL found' });
     }
 
-    // Ensure iframe URL is HTTPS and absolute
-    if (!iframeUrl.startsWith('http')) {
-      iframeUrl = new URL(iframeUrl, baseUrl).toString();
-    }
-    iframeUrl = iframeUrl.replace(/^http:/, 'https:');
-
     console.log('Iframe URL:', iframeUrl);
 
     // Handle external iframe URLs
@@ -222,13 +202,8 @@ app.get('/api/multimovies/stream', async (req, res) => {
       let playerBaseUrl = new URL(iframeUrl).origin;
       
       try {
-        // Check for redirects with HTTPS
-        const headResponse = await axios.head(playerBaseUrl, { 
-          headers: {
-            ...headers,
-            'Referer': secureUrl
-          }
-        });
+        // Check for redirects
+        const headResponse = await axios.head(playerBaseUrl, { headers });
         if (headResponse.request?.res?.responseUrl) {
           playerBaseUrl = new URL(headResponse.request.res.responseUrl).origin;
         }
@@ -247,11 +222,8 @@ app.get('/api/multimovies/stream', async (req, res) => {
         const embedResponse = await axios.post(embedHelperUrl, embedFormData, {
           headers: {
             ...headers,
-            'Referer': iframeUrl,
-            'Origin': playerBaseUrl,
             ...embedFormData.getHeaders()
-          },
-          maxRedirects: 5
+          }
         });
 
         const embedData = embedResponse.data;
@@ -266,11 +238,6 @@ app.get('/api/multimovies/stream', async (req, res) => {
 
         if (siteUrl && siteId) {
           iframeUrl = siteUrl + siteId;
-          // Ensure final URL is HTTPS
-          if (!iframeUrl.startsWith('http')) {
-            iframeUrl = new URL(iframeUrl, playerBaseUrl).toString();
-          }
-          iframeUrl = iframeUrl.replace(/^http:/, 'https:');
           console.log('New iframe URL:', iframeUrl);
         }
       } catch (e) {
@@ -278,30 +245,25 @@ app.get('/api/multimovies/stream', async (req, res) => {
       }
     }
 
-    // Fetch iframe content with proper HTTPS handling
-    const iframeResponse = await axios.get(iframeUrl, { 
-      headers: {
-        ...headers,
-        'Referer': iframeUrl,
-        'Origin': new URL(iframeUrl).origin
-      },
-      maxRedirects: 5
-    });
+    // Fetch iframe content
+    const iframeResponse = await axios.get(iframeUrl, { headers });
     const iframeHtml = iframeResponse.data;
 
-    // Enhanced decoding logic for Vercel environment
+    // Extract the function parameters and the encoded string
+    const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
+    const match = functionRegex.exec(iframeHtml);
     let decodedScript = '';
-    const functionRegex = /eval\(function\([^)]+\)\s*\{[^}]*return p\}[^}]*\}\('([^']+)'/;
-    const match = iframeHtml.match(functionRegex) || iframeHtml.match(/var\s+\w+\s*=\s*'([^']+)'/);
 
-    if (match && match[1]) {
-      const encodedString = match[1];
+    if (match) {
+      const params = match[1].split(',').map(param => param.trim());
+      const encodedString = match[2];
+
       decodedScript = encodedString.split("',36,")?.[0].trim();
       const a = 36;
-      const parts = encodedString.split("',36,")[1]?.split('|') || [];
-      const k = parts.slice(2);
+      const c = encodedString.split("',36,")[1].slice(2).split('|').length;
+      const k = encodedString.split("',36,")[1].slice(2).split('|');
 
-      for (let i = 0; i < k.length; i++) {
+      for (let i = 0; i < c; i++) {
         if (k[i]) {
           const regex = new RegExp('\\b' + i.toString(a) + '\\b', 'g');
           decodedScript = decodedScript.replace(regex, k[i]);
@@ -309,21 +271,17 @@ app.get('/api/multimovies/stream', async (req, res) => {
       }
     }
 
-    // Fallback: Try to find direct m3u8 URL if decoding fails
-    let streamUrl = decodedScript?.match(/https?:\/\/[^"]+?\.m3u8[^"]*/)?.[0];
-    if (!streamUrl) {
-      streamUrl = iframeHtml.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/)?.[1];
-    }
-
+    // Extract stream URL and subtitles
+    const streamUrl = decodedScript?.match(/https?:\/\/[^"]+?\.m3u8[^"]*/)?.[0];
     const subtitles = [];
-    const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || iframeHtml.match(/https:\/\/[^\s"]+\.vtt/g) || [];
+    const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
 
     subtitleMatches.forEach(sub => {
       const langMatch = sub.match(/_([a-zA-Z]{3})\.vtt$/);
       if (langMatch) {
         subtitles.push({
           language: langMatch[1],
-          uri: sub.replace(/^http:/, 'https:'),
+          uri: sub,
           type: 'VTT',
           title: langMatch[1]
         });
@@ -334,10 +292,8 @@ app.get('/api/multimovies/stream', async (req, res) => {
       return res.status(404).json({ error: 'No stream URL found' });
     }
 
-    // Clean up stream URL and ensure HTTPS
-    const cleanStreamUrl = streamUrl
-      .replace(/&i=\d+,'\.4&/, '&i=0.4&')
-      .replace(/^http:/, 'https:');
+    // Clean up stream URL
+    const cleanStreamUrl = streamUrl.replace(/&i=\d+,'\.4&/, '&i=0.4&');
 
     res.json([{
       server: 'MultiMovies',
