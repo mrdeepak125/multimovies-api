@@ -44,7 +44,7 @@ const headers = {
   'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"',
   'sec-ch-ua-mobile': '?0',
   'sec-ch-ua-platform': '"Windows"',
-  'Referer': 'https://multimovies.guru/',
+  'Referer': 'https://multimovies.cloud/',
   'Sec-Fetch-User': '?1',
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
 };
@@ -151,6 +151,7 @@ app.get('/api/multimovies/info', async (req, res) => {
 });
 
 // Route to get stream data
+// Route to get stream data
 app.get('/api/multimovies/stream', async (req, res) => {
   try {
     const { url, type } = req.query;
@@ -160,7 +161,15 @@ app.get('/api/multimovies/stream', async (req, res) => {
 
     console.log('Fetching stream from:', url);
 
-    const response = await axios.get(url, { headers });
+    // Ensure we're using HTTPS for all requests
+    const secureUrl = url.replace(/^http:/, 'https:');
+    const response = await axios.get(secureUrl, { 
+      headers: {
+        ...headers,
+        'Referer': secureUrl,
+        'Origin': new URL(secureUrl).origin
+      }
+    });
     const $ = cheerio.load(response.data);
 
     const postId = $('#player-option-1').attr('data-post');
@@ -177,22 +186,34 @@ app.get('/api/multimovies/stream', async (req, res) => {
     formData.append('nume', nume);
     formData.append('type', typeValue);
 
-    const ajaxUrl = `${BASE_URL}/wp-admin/admin-ajax.php`;
+    const baseUrl = new URL(secureUrl).origin;
+    const ajaxUrl = `${baseUrl}/wp-admin/admin-ajax.php`;
     console.log('Making AJAX request to:', ajaxUrl);
 
-    const ajaxResponse = await axios.post(ajaxUrl, formData, {
+    const playerRes = await axios.post(ajaxUrl, formData, {
       headers: {
         ...headers,
+        'Referer': secureUrl,
+        'Origin': baseUrl,
         ...formData.getHeaders()
-      }
+      },
+      // Important for Vercel environment
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400
     });
 
-    const playerData = ajaxResponse.data;
+    const playerData = playerRes.data;
     let iframeUrl = playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i)?.[1] || playerData?.embed_url;
 
     if (!iframeUrl) {
       return res.status(404).json({ error: 'No iframe URL found' });
     }
+
+    // Ensure iframe URL is HTTPS and absolute
+    if (!iframeUrl.startsWith('http')) {
+      iframeUrl = new URL(iframeUrl, baseUrl).toString();
+    }
+    iframeUrl = iframeUrl.replace(/^http:/, 'https:');
 
     console.log('Iframe URL:', iframeUrl);
 
@@ -201,8 +222,13 @@ app.get('/api/multimovies/stream', async (req, res) => {
       let playerBaseUrl = new URL(iframeUrl).origin;
       
       try {
-        // Check for redirects
-        const headResponse = await axios.head(playerBaseUrl, { headers });
+        // Check for redirects with HTTPS
+        const headResponse = await axios.head(playerBaseUrl, { 
+          headers: {
+            ...headers,
+            'Referer': secureUrl
+          }
+        });
         if (headResponse.request?.res?.responseUrl) {
           playerBaseUrl = new URL(headResponse.request.res.responseUrl).origin;
         }
@@ -221,8 +247,11 @@ app.get('/api/multimovies/stream', async (req, res) => {
         const embedResponse = await axios.post(embedHelperUrl, embedFormData, {
           headers: {
             ...headers,
+            'Referer': iframeUrl,
+            'Origin': playerBaseUrl,
             ...embedFormData.getHeaders()
-          }
+          },
+          maxRedirects: 5
         });
 
         const embedData = embedResponse.data;
@@ -237,6 +266,11 @@ app.get('/api/multimovies/stream', async (req, res) => {
 
         if (siteUrl && siteId) {
           iframeUrl = siteUrl + siteId;
+          // Ensure final URL is HTTPS
+          if (!iframeUrl.startsWith('http')) {
+            iframeUrl = new URL(iframeUrl, playerBaseUrl).toString();
+          }
+          iframeUrl = iframeUrl.replace(/^http:/, 'https:');
           console.log('New iframe URL:', iframeUrl);
         }
       } catch (e) {
@@ -244,44 +278,52 @@ app.get('/api/multimovies/stream', async (req, res) => {
       }
     }
 
-    // Fetch iframe content
-    const iframeResponse = await axios.get(iframeUrl, { headers });
+    // Fetch iframe content with proper HTTPS handling
+    const iframeResponse = await axios.get(iframeUrl, { 
+      headers: {
+        ...headers,
+        'Referer': iframeUrl,
+        'Origin': new URL(iframeUrl).origin
+      },
+      maxRedirects: 5
+    });
     const iframeHtml = iframeResponse.data;
 
-    // Extract stream URL from obfuscated JavaScript
-    const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
-    const match = functionRegex.exec(iframeHtml);
+    // Enhanced decoding logic for Vercel environment
     let decodedScript = '';
+    const functionRegex = /eval\(function\([^)]+\)\s*\{[^}]*return p\}[^}]*\}\('([^']+)'/;
+    const match = iframeHtml.match(functionRegex) || iframeHtml.match(/var\s+\w+\s*=\s*'([^']+)'/);
 
-    if (match) {
-      const params = match[1].split(',').map(param => param.trim());
-      const encodedString = match[2];
-      let p = encodedString.split("',36,")?.[0].trim();
+    if (match && match[1]) {
+      const encodedString = match[1];
+      decodedScript = encodedString.split("',36,")?.[0].trim();
       const a = 36;
-      const c = encodedString.split("',36,")[1].slice(2).split('|').length;
-      const k = encodedString.split("',36,")[1].slice(2).split('|');
+      const parts = encodedString.split("',36,")[1]?.split('|') || [];
+      const k = parts.slice(2);
 
-      for (let i = 0; i < c; i++) {
+      for (let i = 0; i < k.length; i++) {
         if (k[i]) {
           const regex = new RegExp('\\b' + i.toString(a) + '\\b', 'g');
-          p = p.replace(regex, k[i]);
+          decodedScript = decodedScript.replace(regex, k[i]);
         }
       }
-
-      decodedScript = p;
     }
 
-    // Extract stream URL and subtitles
-    const streamUrl = decodedScript?.match(/file:\s*"([^"]+\.m3u8[^"]*)"/)?.[1];
+    // Fallback: Try to find direct m3u8 URL if decoding fails
+    let streamUrl = decodedScript?.match(/https?:\/\/[^"]+?\.m3u8[^"]*/)?.[0];
+    if (!streamUrl) {
+      streamUrl = iframeHtml.match(/file:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/)?.[1];
+    }
+
     const subtitles = [];
-    const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
+    const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || iframeHtml.match(/https:\/\/[^\s"]+\.vtt/g) || [];
 
     subtitleMatches.forEach(sub => {
       const langMatch = sub.match(/_([a-zA-Z]{3})\.vtt$/);
       if (langMatch) {
         subtitles.push({
           language: langMatch[1],
-          uri: sub,
+          uri: sub.replace(/^http:/, 'https:'),
           type: 'VTT',
           title: langMatch[1]
         });
@@ -292,8 +334,10 @@ app.get('/api/multimovies/stream', async (req, res) => {
       return res.status(404).json({ error: 'No stream URL found' });
     }
 
-    // Clean up stream URL
-    const cleanStreamUrl = streamUrl.replace(/&i=\d+,'\.4&/, '&i=0.4&');
+    // Clean up stream URL and ensure HTTPS
+    const cleanStreamUrl = streamUrl
+      .replace(/&i=\d+,'\.4&/, '&i=0.4&')
+      .replace(/^http:/, 'https:');
 
     res.json([{
       server: 'MultiMovies',
@@ -315,6 +359,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
     });
   }
 });
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
