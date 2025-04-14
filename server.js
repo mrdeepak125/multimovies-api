@@ -44,12 +44,12 @@ const headers = {
   'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"',
   'sec-ch-ua-mobile': '?0',
   'sec-ch-ua-platform': '"Windows"',
-  'Referer': 'https://multimovies.press/',
+  'Referer': 'https://multimovies.cloud/',
   'Sec-Fetch-User': '?1',
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
 };
 
-const BASE_URL = 'https://multimovies.press';
+const BASE_URL = 'https://multimovies.guru';
 
 // Helper function for axios requests with better error handling
 async function fetchWithRetry(url, options = {}, retries = 2) {
@@ -177,17 +177,18 @@ app.get('/api/multimovies/stream', async (req, res) => {
     formData.append('nume', nume);
     formData.append('type', typeValue);
 
-    const ajaxUrl = `${BASE_URL}/wp-admin/admin-ajax.php`;
+    const baseUrl = new URL(url).origin;
+    const ajaxUrl = `${baseUrl}/wp-admin/admin-ajax.php`;
     console.log('Making AJAX request to:', ajaxUrl);
 
-    const ajaxResponse = await axios.post(ajaxUrl, formData, {
+    const playerRes = await axios.post(ajaxUrl, formData, {
       headers: {
         ...headers,
         ...formData.getHeaders()
       }
     });
 
-    const playerData = ajaxResponse.data;
+    const playerData = playerRes.data;
     let iframeUrl = playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i)?.[1] || playerData?.embed_url;
 
     if (!iframeUrl) {
@@ -248,7 +249,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
     const iframeResponse = await axios.get(iframeUrl, { headers });
     const iframeHtml = iframeResponse.data;
 
-    // Extract stream URL from obfuscated JavaScript
+    // Extract the function parameters and the encoded string
     const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
     const match = functionRegex.exec(iframeHtml);
     let decodedScript = '';
@@ -256,7 +257,8 @@ app.get('/api/multimovies/stream', async (req, res) => {
     if (match) {
       const params = match[1].split(',').map(param => param.trim());
       const encodedString = match[2];
-      let p = encodedString.split("',36,")?.[0].trim();
+
+      decodedScript = encodedString.split("',36,")?.[0].trim();
       const a = 36;
       const c = encodedString.split("',36,")[1].slice(2).split('|').length;
       const k = encodedString.split("',36,")[1].slice(2).split('|');
@@ -264,15 +266,13 @@ app.get('/api/multimovies/stream', async (req, res) => {
       for (let i = 0; i < c; i++) {
         if (k[i]) {
           const regex = new RegExp('\\b' + i.toString(a) + '\\b', 'g');
-          p = p.replace(regex, k[i]);
+          decodedScript = decodedScript.replace(regex, k[i]);
         }
       }
-
-      decodedScript = p;
     }
 
     // Extract stream URL and subtitles
-    const streamUrl = decodedScript?.match(/file:\s*"([^"]+\.m3u8[^"]*)"/)?.[1];
+    const streamUrl = decodedScript?.match(/https?:\/\/[^"]+?\.m3u8[^"]*/)?.[0];
     const subtitles = [];
     const subtitleMatches = decodedScript?.match(/https:\/\/[^\s"]+\.vtt/g) || [];
 
@@ -315,6 +315,7 @@ app.get('/api/multimovies/stream', async (req, res) => {
     });
   }
 });
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
