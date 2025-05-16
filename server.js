@@ -49,7 +49,7 @@ const headers = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
 };
 
-const BASE_URL = 'https://multimovies.guru';
+const BASE_URL = 'https://multimovies.media';
 
 // Helper function for axios requests with better error handling
 async function fetchWithRetry(url, options = {}, retries = 2) {
