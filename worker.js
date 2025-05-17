@@ -1,3 +1,4 @@
+const { createCloudflareWorker } = require('@cloudflare/workers-express');
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -322,7 +323,5 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+module.exports = createCloudflareWorker(app);
