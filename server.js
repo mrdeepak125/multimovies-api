@@ -14,7 +14,7 @@ const cache = new NodeCache({ stdTTL: 60 * 15 }); // 15 minute cache
 
 // Configure axios with longer timeouts and retries
 axiosRetry(axios, {
-  retries: 15,
+  retries: 3,
   retryDelay: (retryCount) => {
     return retryCount * 2000; // 2s, 4s, then 6s delay between retries
   },
