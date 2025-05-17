@@ -1,8 +1,0 @@
-name = "multimovies-api"
-main = "worker.js"
-compatibility_date = "2024-05-17"
-
-compatibility_flags = ["nodejs_compat"]  # Replaces node_compat
-
-[build]
-command = "npm install && npm run build"
